@@ -1190,5 +1190,24 @@ document.addEventListener('dragstart', (e) => e.preventDefault());
 /* ---------------- boot ---------------- */
 
 navigator.storage?.persist?.();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+setupUpdates();
 load();
+
+// Updates: an installed iPhone app is usually resumed, not reloaded, so check for a new version
+// each time it comes to the foreground, and reload into it once it takes over. The reload waits
+// until no sheet or day-picker is open, so a half-typed weigh-in is never lost.
+function setupUpdates() {
+  if (!('serviceWorker' in navigator)) return;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+  }).catch(() => {});
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return; // first install: nothing old to replace
+    reloading = true;
+    const busy = () => document.body.classList.contains('sheet-open') || state.pick || viewer.classList.contains('open');
+    const go = () => (busy() ? setTimeout(go, 1000) : location.reload());
+    go();
+  });
+}
