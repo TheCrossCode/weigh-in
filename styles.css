@@ -223,6 +223,16 @@ body.picking main { padding-bottom: calc(env(safe-area-inset-bottom) + 32px); }
 .share-preview.loading::after { content: ""; width: 28px; height: 28px; border-radius: 50%; border: 2.5px solid var(--dim); border-top-color: var(--accent); animation: spin .7s linear infinite; grid-area: 1 / 1; }
 .share-preview.loading img { opacity: .35; grid-area: 1 / 1; }
 .primary:disabled { opacity: .45; }
+.pcard-time { display: flex; justify-content: space-between; margin-top: 16px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.pcard-time span:nth-child(2) { color: var(--text); }
+.bar.time { margin-top: 6px; height: 4px; }
+.bar.time span { background: var(--muted); }
+.date-opt { position: relative; display: flex; justify-content: flex-end; }
+.date-opt em { display: none; position: absolute; right: 0; top: 50%; transform: translateY(-50%); font-style: normal; color: var(--dim); font-weight: 600; pointer-events: none; }
+.date-opt.empty em { display: block; }
+.date-opt.empty input { color: transparent; }
+.date-opt.empty input::-webkit-calendar-picker-indicator { opacity: 0; }
+.field .date-opt input { min-width: 120px; }
 .pcard .ghost { flex: 1; width: 100%; height: 44px; border-radius: 12px; background: var(--surface2); font-weight: 600; font-size: 14px; color: var(--muted); }
 
 /* ---------- sheet ---------- */

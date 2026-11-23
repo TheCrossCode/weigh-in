@@ -130,6 +130,10 @@ async function load() {
   const [logs, programs] = await Promise.all([getAll('entries'), getAll('programs')]);
   state.logs = logs.sort(byOrder);
   state.programs = programs.sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
+  // A program whose planned end date has passed finishes on that date.
+  for (const p of state.programs) {
+    if (!p.endDate && p.planEnd && p.planEnd < todayStr()) { p.endDate = p.planEnd; await put('programs', p); }
+  }
   render();
 }
 
@@ -220,7 +224,7 @@ function period(range, off) {
 let chartSeq = 0;
 // Draws a weight line into `el`. `entries` may include one point either side of the window
 // so the line runs off the edges; only `inRange` points get dots and tooltips.
-function drawChart(el, { entries, inRange, t0, t1, ticks = [], color = 'var(--accent)', target = null, dots = false, H = 140 }) {
+function drawChart(el, { entries, inRange, t0, t1, ticks = [], color = 'var(--accent)', target = null, path = null, dots = false, H = 140 }) {
   const W = el.clientWidth || 340;
   const PL = 14, PR = 44, PT = 18, PB = ticks.length ? 26 : 12;
   const plotB = H - PB;
@@ -256,6 +260,7 @@ function drawChart(el, { entries, inRange, t0, t1, ticks = [], color = 'var(--ac
     </defs>
     ${target != null ? `<line x1="${PL}" x2="${W - PR}" y1="${Y(toDisp(target)).toFixed(1)}" y2="${Y(toDisp(target)).toFixed(1)}" style="stroke:${color};stroke-width:1.5;stroke-dasharray:5 5;opacity:.55"/>` : ''}
     <g clip-path="url(#cc${id})">
+      ${path ? `<line x1="${X(path.t0).toFixed(1)}" y1="${Y(toDisp(path.v0)).toFixed(1)}" x2="${X(path.t1).toFixed(1)}" y2="${Y(toDisp(path.v1)).toFixed(1)}" style="stroke:var(--muted);stroke-width:1.5;stroke-dasharray:2 4;stroke-linecap:round;opacity:.7"/>` : ''}
       <path d="${area}" fill="url(#cg${id})"/>
       <path d="${line}" style="fill:none;stroke:${color};stroke-width:2.25;stroke-linejoin:round;stroke-linecap:round"/>
       ${showDots ? inPts.map((p) => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" style="fill:${color}"/>`).join('') : ''}
@@ -305,13 +310,19 @@ function shiftPeriod(dir) {
 
 function programChart(el, p) {
   const s = programStats(p);
+  // A live program with a planned end shows the whole plan, so the remaining runway is visible.
+  const last = !p.endDate && p.planEnd && p.planEnd > s.end ? p.planEnd : s.end;
   const t0 = parseDay(p.startDate).getTime();
-  const t1 = parseDay(s.end).getTime() + DAY;
+  const t1 = parseDay(last).getTime() + DAY;
   const inRange = state.logs.filter((l) => l.date >= p.startDate && l.date <= s.end);
   const entries = s.base && !inRange.includes(s.base) ? [s.base, ...inRange] : inRange;
+  // Goal path: straight line from the starting weight to the target on the planned end date.
+  const path = p.planEnd && p.target != null && s.base
+    ? { t0, v0: s.base.weight, t1: parseDay(p.planEnd).getTime() + DAY, v1: p.target } : null;
   drawChart(el, {
-    entries, inRange, t0, t1, color: `var(--${p.type})`, target: p.target, H: 130,
-    ticks: [{ t: t0, label: fmtDate(p.startDate), anchor: 'start' }, { t: t1, label: p.endDate ? fmtDate(p.endDate) : 'Today', anchor: 'end' }],
+    entries, inRange, t0, t1, color: `var(--${p.type})`, target: p.target, path, H: 130,
+    ticks: [{ t: t0, label: fmtDate(p.startDate), anchor: 'start' },
+      { t: t1, label: last === todayStr() && !p.endDate ? 'Today' : fmtDate(last), anchor: 'end' }],
   });
 }
 function drawProgramCharts(root = document) {
@@ -478,7 +489,13 @@ function programStats(p) {
     const total = p.target - base.weight;
     progress = total === 0 ? 1 : Math.max(0, Math.min(1, (cur.weight - base.weight) / total));
   }
-  return { end, base, cur, days, change, rate, progress };
+  const total = p.planEnd ? dayDiff(p.startDate, p.planEnd) + 1 : null;
+  return { end, base, cur, days, total, change, rate, progress };
+}
+
+function daysLeft(p) {
+  const n = dayDiff(todayStr(), p.planEnd);
+  return n <= 0 ? 'Last day' : `${n} day${n === 1 ? '' : 's'} left`;
 }
 
 function programCard(p, live) {
@@ -486,7 +503,7 @@ function programCard(p, live) {
   const v = (kg) => (kg == null ? '—' : fmt(kg));
   return `<div class="pcard ${p.type}">
     <div class="pcard-top"><span class="badge ${p.type}">${cap(p.type)}</span>
-      <span class="pday">${live ? `Day ${s.days}` : `${fmtDate(p.startDate)} – ${fmtDate(p.endDate)}`}</span></div>
+      <span class="pday">${live ? `Day ${s.days}${s.total ? ` of ${s.total}` : ''}` : `${fmtDate(p.startDate)} – ${fmtDate(p.endDate)}`}</span></div>
     <div class="pcard-change"><span class="big2 ${tone(s.change, p.type)}">${signed(s.change)}</span><span class="unit">${state.unit}</span></div>
     <div class="chart pchart" data-id="${p.id}"></div>
     <div class="pcard-row">
@@ -496,10 +513,12 @@ function programCard(p, live) {
       <div><div class="v ${tone(s.rate, p.type)}">${signed(s.rate)}</div><div class="l">/ Week</div></div>
     </div>
     ${s.progress != null ? `<div class="bar"><span style="width:${(s.progress * 100).toFixed(1)}%"></span></div>` : ''}
+    ${live && s.total ? `<div class="pcard-time"><span>${fmtDate(p.startDate)}</span><span>${daysLeft(p)}</span><span>${fmtDate(p.planEnd)}</span></div>
+      <div class="bar time"><span style="width:${Math.min(100, (s.days / s.total) * 100).toFixed(1)}%"></span></div>` : ''}
     <div class="pcard-actions">
       <button class="ghost" data-act="share-program" data-id="${p.id}">Share</button>
       ${live
-        ? `<button class="ghost" data-act="end-program">End ${p.type}</button>`
+        ? `<button class="ghost" data-act="edit-program">Edit</button><button class="ghost" data-act="end-program">End</button>`
         : `<button class="ghost danger" data-act="delete-program" data-id="${p.id}">Delete</button>`}
     </div>
   </div>`;
@@ -645,34 +664,48 @@ function openLogSheet({ id = null, date = todayStr() } = {}) {
   input.onkeydown = (e) => { if (e.key === 'Enter') { input.blur(); save(); } };
 }
 
-function openProgramSheet(type) {
+// Start a new program, or edit the active one (`existing`). `planEnd` is the optional planned
+// last day; once it has passed the program finishes on its own (see autoFinish).
+function openProgramSheet(type, existing = null) {
+  const start0 = existing?.startDate || todayStr();
   openSheet(`
-    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">New program</div><span></span></div>
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">${existing ? 'Edit program' : 'New program'}</div><span></span></div>
     <div class="seg" id="p-type"><button data-v="cut">Cut</button><button data-v="bulk">Bulk</button></div>
-    <label class="field"><span>Target</span><span class="field-in"><input id="p-target" inputmode="decimal" placeholder="Optional"><em>${state.unit}</em></span></label>
-    <label class="field"><span>Start</span><input type="date" id="p-start" value="${todayStr()}" max="${todayStr()}"></label>
+    <label class="field"><span>Target</span><span class="field-in"><input id="p-target" inputmode="decimal" placeholder="Optional" value="${existing?.target != null ? fmt(existing.target) : ''}"><em>${state.unit}</em></span></label>
+    <label class="field"><span>Start</span><input type="date" id="p-start" value="${start0}" max="${todayStr()}"></label>
+    <label class="field"><span>End</span><span class="date-opt"><input type="date" id="p-end" value="${existing?.planEnd || ''}" min="${addDays(start0, 1)}"><em>Optional</em></span></label>
+    <p class="foot" id="p-len"></p>
     <button class="primary" id="p-go"></button>`);
 
+  const go = $('#p-go', sheet), startIn = $('#p-start', sheet), endIn = $('#p-end', sheet), len = $('#p-len', sheet);
   const setType = (t) => {
     type = t;
     sheet.querySelectorAll('#p-type button').forEach((b) => (b.className = b.dataset.v === t ? `on ${t}` : ''));
-    const go = $('#p-go', sheet);
     go.className = `primary ${t}`;
-    go.textContent = `Start ${t}`;
+    go.textContent = existing ? 'Save' : `Start ${t}`;
+  };
+  // Show how long the plan is, and keep the end after the start.
+  const syncEnd = () => {
+    endIn.min = addDays(startIn.value || todayStr(), 1);
+    endIn.parentElement.classList.toggle('empty', !endIn.value);
+    const n = endIn.value ? dayDiff(startIn.value || todayStr(), endIn.value) + 1 : 0;
+    len.textContent = n > 0 ? `${n} days · ${(n / 7).toFixed(n % 7 ? 1 : 0)} weeks` : '';
   };
   setType(type);
+  syncEnd();
+  startIn.onchange = endIn.onchange = endIn.oninput = syncEnd;
   $('#p-type', sheet).onclick = (e) => { const b = e.target.closest('button'); if (b) setType(b.dataset.v); };
 
-  $('#p-go', sheet).onclick = async () => {
+  go.onclick = async () => {
     const raw = $('#p-target', sheet).value.trim().replace(',', '.');
     const t = raw ? parseFloat(raw) : null;
     if (raw && !(t > 0 && t < 1500)) { $('#p-target', sheet).classList.add('shake'); return; }
+    const startDate = startIn.value || todayStr();
+    const planEnd = endIn.value || null;
+    if (planEnd && planEnd <= startDate) { endIn.closest('.field').classList.add('shake'); return; }
     await put('programs', {
-      id: Date.now().toString(36),
-      type,
-      startDate: $('#p-start', sheet).value || todayStr(),
-      endDate: null,
-      target: t == null ? null : fromDisp(t),
+      ...(existing || { id: Date.now().toString(36), endDate: null }),
+      type, startDate, planEnd, target: t == null ? null : fromDisp(t),
     });
     closeSheet();
     await load();
@@ -879,7 +912,9 @@ function programCardImg(id, withPhotos) {
     hasPhotos: ph.length > 0,
     accent: C[p.type], dot: true, kicker: p.type.toUpperCase(), kickerColor: C[p.type],
     head: signed(s.change), headColor: toneColor(tone(s.change, p.type)),
-    sub: `${s.days} days · ${fmtDate(p.startDate)} – ${p.endDate ? fmtDate(p.endDate) : 'today'}`,
+    sub: !p.endDate && s.total
+      ? `Day ${s.days} of ${s.total} · ${fmtDate(p.startDate)} – ${fmtDate(p.planEnd)}`
+      : `${s.days} days · ${fmtDate(p.startDate)} – ${p.endDate ? fmtDate(p.endDate) : 'today'}`,
     photos: withPhotos ? ph : [],
     chart: s.base && !logs.includes(s.base) ? [s.base, ...logs] : logs,
     stats: [[v(s.base?.weight), 'Start'], [v(s.cur?.weight), p.endDate ? 'End' : 'Now'], [v(p.target), 'Target'],
@@ -1101,6 +1136,7 @@ document.addEventListener('click', async (e) => {
       if (confirm(`Delete this ${fmtDate(byId(id).date)} log?`)) { await del('entries', id); closeSheet(); await load(); }
       break;
     case 'start': openProgramSheet(el.dataset.type); break;
+    case 'edit-program': { const p = activeProgram(); if (p) openProgramSheet(p.type, p); break; }
     case 'end-program': {
       const p = activeProgram();
       if (p && confirm(`End this ${p.type}?`)) {
@@ -1139,7 +1175,8 @@ addEventListener('resize', () => {
   rz = setTimeout(() => { renderChart(); drawProgramCharts(); }, 120);
 });
 // Re-render when the app comes back to the foreground on a new day.
-document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+// (load, not just render, so a program whose end date passed overnight finishes.)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 
 /* ---------------- native feel ---------------- */
 
